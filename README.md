@@ -1,21 +1,13 @@
-# Sequential GCN for Active Learning
-Please cite if using the code: [Link to paper.](https://arxiv.org/pdf/2006.10219.pdf)
+# Visual Transformer for Task-aware Active Learning
+
 ## Requirements:
 python 3.6+
-
 torch 1.0+
 
 pip libraries: tqdm, sklearn, scipy, math
 
 ## Run:
-For running **UncertainGCN** on CIFAR-10 over 5 sampling stages of 1000 images:
-```bash 
-python main.py -m UncertainGCN -d cifar10 -c 5 # Other available datasets cifar100, fashionmnist, svhn
-```
-**CoreGCN**, the geometric method that uses GCN training, can be run as:
-```bash 
-python main.py -m CoreGCN -d cifar10 -c 5 # Other AL methods: Random, VAAL, CoreSet, lloss
-```
+
 Please have a look over the config file before running. Also, check the args of the code.
 CUDA-GPU implementation, not tested on CPU. Different random seed might produce different results.
 
@@ -26,5 +18,7 @@ Learning Loss for Active Learning: https://arxiv.org/pdf/1905.03677.pdf [lloss]
 
 Variational Adversial Active Learning: https://arxiv.org/pdf/1904.00370.pdf [VAAL]
 
+Contextual Diversity for Active Learning: https://arxiv.org/abs/2008.05723 [CDAL]
+
 ## Contact
-If there are any questions or concerns feel free to send a message at: r.caramalau18@imperial.ac.uk
+If there are any questions or RaFD synthetica dataset request, feel free to send a message at: r.caramalau18@imperial.ac.uk
