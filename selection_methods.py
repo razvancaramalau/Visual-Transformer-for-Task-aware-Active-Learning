@@ -3,31 +3,19 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 import torch.optim as optim
+from PIL import Image
+from tqdm import tqdm
+from torch.distributions import Bernoulli
 # Custom
+from rewards import compute_reward
+# from main_vt import NO_CLASSES
 from config import *
-from models.query_models import VAE, Discriminator, GCN
+from models.query_models import VAE, Discriminator, GCN, DSN
 from data.sampler import SubsetSequentialSampler
 from kcenterGreedy import kCenterGreedy
+from sklearn.cluster import KMeans
+from sklearn.metrics import pairwise_distances
 
-def BCEAdjLoss(scores, lbl, nlbl, l_adj):
-    lnl = torch.log(scores[lbl])
-    lnu = torch.log(1 - scores[nlbl])
-    labeled_score = torch.mean(lnl) 
-    unlabeled_score = torch.mean(lnu)
-    bce_adj_loss = -labeled_score - l_adj*unlabeled_score
-    return bce_adj_loss
-
-
-def aff_to_adj(x, y=None):
-    x = x.detach().cpu().numpy()
-    adj = np.matmul(x, x.transpose())
-    adj +=  -1.0*np.eye(adj.shape[0])
-    adj_diag = np.sum(adj, axis=0) #rowise sum
-    adj = np.matmul(adj, np.diag(1/adj_diag))
-    adj = adj + np.eye(adj.shape[0])
-    adj = torch.Tensor(adj).cuda()
-
-    return adj
 
 def read_data(dataloader, labels=True):
     if labels:
@@ -67,7 +55,7 @@ def train_vaal(models, optimizers, labeled_dataloader, unlabeled_dataloader, cyc
     unlabeled_data = read_data(unlabeled_dataloader)
 
     train_iterations = int( (ADDENDUM*cycle+ SUBSET) * EPOCHV / BATCH )
-
+    train_iterations = 901
     for iter_count in range(train_iterations):
         labeled_imgs, labels = next(labeled_data)
         unlabeled_imgs = next(unlabeled_data)[0]
@@ -147,7 +135,10 @@ def train_vaal(models, optimizers, labeled_dataloader, unlabeled_dataloader, cyc
                     labels = labels.cuda()
             if iter_count % 100 == 0:
                 print("Iteration: " + str(iter_count) + "  vae_loss: " + str(total_vae_loss.item()) + " dsc_loss: " +str(dsc_loss.item()))
-                
+#
+def entropy(p, dim = -1, keepdim = None):
+   return torch.sum(-torch.where(p > 0, p * p.log(), p.new([0.0])), dim=dim) # can be a scalar, when PyTorch.supports it
+
 def get_uncertainty(models, unlabeled_loader):
     models['backbone'].eval()
     models['module'].eval()
@@ -160,6 +151,7 @@ def get_uncertainty(models, unlabeled_loader):
                 inputs = inputs.cuda()
             _, _, features = models['backbone'](inputs)
             pred_loss = models['module'](features) # pred_loss = criterion(scores, labels) # ground truth loss
+            pred_loss = entropy(pred_loss)
             pred_loss = pred_loss.view(pred_loss.size(0))
             uncertainty = torch.cat((uncertainty, pred_loss), 0)
     
@@ -178,111 +170,79 @@ def get_features(models, unlabeled_loader):
             feat = features #.detach().cpu().numpy()
     return feat
 
-def get_kcg(models, labeled_data_size, unlabeled_loader):
+def get_kcg(models, labeled_data_size, unlabeled_loader, subset):
+    models['backbone'].eval()
+    with torch.cuda.device(CUDA_VISIBLE_DEVICES):
+        features = torch.tensor([]).cuda()
+        labels_batch = torch.tensor([], dtype=torch.long).cuda() 
+
+    with torch.no_grad():
+        for inputs, labels, _ in unlabeled_loader:
+            with torch.cuda.device(CUDA_VISIBLE_DEVICES):
+                inputs = inputs.cuda()
+                labels = labels.cuda()
+            _, features_batch, _ = models['backbone'](inputs)
+            features = torch.cat((features, features_batch), 0)
+            labels_batch = torch.cat((labels_batch, labels), 0)
+        feat = features.detach().cpu().numpy()
+        # feat = features_batch.detach().cpu().numpy()
+        # np.save("feat_s.npy", feat)
+        # np.save("labels_s.npy", labels_batch.detach().cpu().numpy())
+
+        new_av_idx = np.arange(subset,(subset + labeled_data_size))
+        sampling = kCenterGreedy(feat)  
+        batch = sampling.select_batch_(new_av_idx, 2500)
+        # print(min(batch), max(batch))
+        other_idx = [x for x in range(subset) if x not in batch]
+    # np.save("selected_s.npy", batch)
+    return  other_idx + batch
+
+def get_kcg2(models, unlabeled_data_size, labeled_data_size, unlabeled_loader):
     models['backbone'].eval()
     with torch.cuda.device(CUDA_VISIBLE_DEVICES):
         features = torch.tensor([]).cuda()
 
     with torch.no_grad():
-        for inputs, _, _ in unlabeled_loader:
+        for inputs, _ in unlabeled_loader:
             with torch.cuda.device(CUDA_VISIBLE_DEVICES):
                 inputs = inputs.cuda()
             _, features_batch, _ = models['backbone'](inputs)
             features = torch.cat((features, features_batch), 0)
         feat = features.detach().cpu().numpy()
-        new_av_idx = np.arange(SUBSET,(SUBSET + labeled_data_size))
+        new_av_idx = np.arange(unlabeled_data_size,(unlabeled_data_size + labeled_data_size))
         sampling = kCenterGreedy(feat)  
         batch = sampling.select_batch_(new_av_idx, ADDENDUM)
-        other_idx = [x for x in range(SUBSET) if x not in batch]
+        other_idx = [x for x in range(unlabeled_data_size) if x not in batch]
     return  other_idx + batch
 
-
 # Select the indices of the unlablled data according to the methods
-def query_samples(model, method, data_unlabeled, subset, labeled_set, cycle, args):
-
+def query_samples(model, method, data_unlabeled, subset, labeled_set, cycle, args, synth_set, drop_flag, NUM_TRAIN):
+    SUBSET = NUM_TRAIN
     if method == 'Random':
-        arg = np.random.randint(SUBSET, size=SUBSET)
-
-    if (method == 'UncertainGCN') or (method == 'CoreGCN'):
-        # Create unlabeled dataloader for the unlabeled subset
-        unlabeled_loader = DataLoader(data_unlabeled, batch_size=BATCH, 
-                sampler=SubsetSequentialSampler(subset+labeled_set), # more convenient if we maintain the order of subset
-                                    pin_memory=True)
-        binary_labels = torch.cat((torch.zeros([SUBSET, 1]),(torch.ones([len(labeled_set),1]))),0)
-
-
-        features = get_features(model, unlabeled_loader)
-        features = nn.functional.normalize(features)
-        adj = aff_to_adj(features)
-
-        gcn_module = GCN(nfeat=features.shape[1],
-                         nhid=args.hidden_units,
-                         nclass=1,
-                         dropout=args.dropout_rate).cuda()
-                                
-        models      = {'gcn_module': gcn_module}
-
-        optim_backbone = optim.Adam(models['gcn_module'].parameters(), lr=LR_GCN, weight_decay=WDECAY)
-        optimizers = {'gcn_module': optim_backbone}
-
-        lbl = np.arange(SUBSET, SUBSET+(cycle+1)*ADDENDUM, 1)
-        nlbl = np.arange(0, SUBSET, 1)
-        
-        ############
-        for _ in range(200):
-
-            optimizers['gcn_module'].zero_grad()
-            outputs, _, _ = models['gcn_module'](features, adj)
-            lamda = args.lambda_loss 
-            loss = BCEAdjLoss(outputs, lbl, nlbl, lamda)
-            loss.backward()
-            optimizers['gcn_module'].step()
-
-
-        models['gcn_module'].eval()
-        with torch.no_grad():
-            with torch.cuda.device(CUDA_VISIBLE_DEVICES):
-                inputs = features.cuda()
-                labels = binary_labels.cuda()
-            scores, _, feat = models['gcn_module'](inputs, adj)
-            
-            if method == "CoreGCN":
-                feat = feat.detach().cpu().numpy()
-                new_av_idx = np.arange(SUBSET,(SUBSET + (cycle+1)*ADDENDUM))
-                sampling2 = kCenterGreedy(feat)  
-                batch2 = sampling2.select_batch_(new_av_idx, ADDENDUM)
-                other_idx = [x for x in range(SUBSET) if x not in batch2]
-                arg = other_idx + batch2
-
-            else:
-
-                s_margin = args.s_margin 
-                scores_median = np.squeeze(torch.abs(scores[:SUBSET] - s_margin).detach().cpu().numpy())
-                arg = np.argsort(-(scores_median))
-
-            print("Max confidence value: ",torch.max(scores.data))
-            print("Mean confidence value: ",torch.mean(scores.data))
-            preds = torch.round(scores)
-            correct_labeled = (preds[SUBSET:,0] == labels[SUBSET:,0]).sum().item() / ((cycle+1)*ADDENDUM)
-            correct_unlabeled = (preds[:SUBSET,0] == labels[:SUBSET,0]).sum().item() / SUBSET
-            correct = (preds[:,0] == labels[:,0]).sum().item() / (SUBSET + (cycle+1)*ADDENDUM)
-            print("Labeled classified: ", correct_labeled)
-            print("Unlabeled classified: ", correct_unlabeled)
-            print("Total classified: ", correct)
+        arg = np.random.randint(len(subset), size=len(subset))
     
     if method == 'CoreSet':
         # Create unlabeled dataloader for the unlabeled subset
         unlabeled_loader = DataLoader(data_unlabeled, batch_size=BATCH, 
                                     sampler=SubsetSequentialSampler(subset+labeled_set), # more convenient if we maintain the order of subset
-                                    pin_memory=True)
-
-        arg = get_kcg(model, ADDENDUM*(cycle+1), unlabeled_loader)
-
+                                    pin_memory=True, drop_last=drop_flag)
+        if drop_flag:
+            if cycle==0:
+                limit_subset = 5000
+            else:
+                limit_subset = 5000 + int((SUBSET+(cycle)*ADDENDUM)/BATCH) * BATCH - SUBSET
+        else:
+            if cycle==0:
+                limit_subset = 5000
+            else:
+                limit_subset = 5000 + ADDENDUM*(cycle)
+        arg = get_kcg(model, limit_subset, unlabeled_loader, 49920-limit_subset)
+        # print(min(arg), max(arg))
     if method == 'lloss':
         # Create unlabeled dataloader for the unlabeled subset
         unlabeled_loader = DataLoader(data_unlabeled, batch_size=BATCH, 
                                     sampler=SubsetSequentialSampler(subset), 
-                                    pin_memory=True)
+                                    pin_memory=True, drop_last=drop_flag)
 
         # Measure uncertainty of each data points in the subset
         uncertainty = get_uncertainty(model, unlabeled_loader)
@@ -292,10 +252,10 @@ def query_samples(model, method, data_unlabeled, subset, labeled_set, cycle, arg
         # Create unlabeled dataloader for the unlabeled subset
         unlabeled_loader = DataLoader(data_unlabeled, batch_size=BATCH, 
                                     sampler=SubsetSequentialSampler(subset), 
-                                    pin_memory=True)
+                                    pin_memory=True, drop_last=drop_flag)
         labeled_loader = DataLoader(data_unlabeled, batch_size=BATCH, 
                                     sampler=SubsetSequentialSampler(labeled_set), 
-                                    pin_memory=True)
+                                    pin_memory=True, drop_last=drop_flag)
         if args.dataset == 'fashionmnist':
             vae = VAE(28,1,3)
             discriminator = Discriminator(28)
@@ -311,7 +271,7 @@ def query_samples(model, method, data_unlabeled, subset, labeled_set, cycle, arg
         train_vaal(models,optimizers, labeled_loader, unlabeled_loader, cycle+1)
         
         all_preds, all_indices = [], []
-
+        #         break
         for images, _, indices in unlabeled_loader:                       
             images = images.cuda()
             with torch.no_grad():
@@ -328,4 +288,74 @@ def query_samples(model, method, data_unlabeled, subset, labeled_set, cycle, arg
         all_preds *= -1
         # select the points which the discriminator things are the most likely to be unlabeled
         _, arg = torch.sort(all_preds) 
+
+
+    if method == 'CDAL':
+        if args.dataset == 'cifar100':
+            hidd_dim = 1024
+            number_of_picks = 2000
+        else:
+            hidd_dim = 256
+            number_of_picks = 100
+        unlabeled_loader = DataLoader(data_unlabeled, batch_size=BATCH, 
+                                            sampler=SubsetSequentialSampler(subset[:10000]), # more convenient if we maintain the order of subset
+                                            pin_memory=True, drop_last=drop_flag)
+        # features = get_features(model, unlabeled_loader)
+        all_preds = []
+        for images, _, indices in unlabeled_loader:                       
+            images = images.cuda()
+            with torch.no_grad():
+                preds, _, _ = model['backbone'](images)
+                preds = preds.cpu().data
+                all_preds.extend(preds)
+        
+        # features = torch.from_numpy(np.load("CDAL/features/000017.npy"))
+        features = torch.Tensor(torch.stack(all_preds)).cuda()
+        features = nn.functional.normalize(features, dim=1)
+        No_classes = features.shape[1]
+        model = DSN(in_dim=No_classes, hid_dim=hidd_dim)
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-02, weight_decay=1e-05)
+        # scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
+        start_epoch = 0
+        max_epoch = 20
+        # start = 0
+        model.train()
+        baseline=0.
+        best_reward=0.0
+        best_pi=[]
+        use_gpu = True
+        num_episode = 1
+
+        beta = 0.01
+        arg = []
+        if use_gpu: model = model.cuda()
+        for epoch in range(start_epoch, max_epoch):
+            seq = features
+            seq = seq.unsqueeze(0) # input shape (1, seq_len, dim)
+            if use_gpu: seq = seq.cuda()
+            probs = model(seq) # output shape (1, seq_len, 1)
+            cost = beta * (probs.mean() - 0.5)**2 
+            m = Bernoulli(probs)
+            epis_rewards = []
+            for _ in range(num_episode):
+                actions = m.sample()
+                log_probs = m.log_prob(actions)
+                reward,pick_idxs = compute_reward(seq, actions, probs, nc=No_classes, picks=number_of_picks, use_gpu=use_gpu)
+                if(reward>best_reward):
+                    best_reward=reward
+                    best_pi=pick_idxs
+                expected_reward = log_probs.mean() * (reward - baseline)
+                cost -= expected_reward # minimize negative expected reward
+                epis_rewards.append(reward.item())
+
+            optimizer.zero_grad()
+            cost.backward()
+            optimizer.step()
+            baseline = 0.9 * baseline + 0.1 * np.mean(epis_rewards) # update baseline reward via moving average
+            print("epoch {}/{}\t reward {}\t".format(epoch+1, max_epoch, np.mean(epis_rewards)))
+            # f=open('selection/'+str(start)+'.txt','w')
+
+        other_idx = [x for x in range(SUBSET - (cycle+1) * 100) if x not in best_pi]
+        arg = other_idx + best_pi.tolist()
+            # f.close()
     return arg
