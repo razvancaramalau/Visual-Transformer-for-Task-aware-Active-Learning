@@ -9,7 +9,7 @@ pip libraries: tqdm, sklearn, scipy, math
 ## Run:
 
 Please have a look over the config file before running. Also, check the args of the code.
-CUDA-GPU implementation, not tested on CPU. Different random seed might produce different results.
+CUDA-GPU implementation. Different random seed might produce different results.
 
 ## Active Learning methods implemented:
 Active Learning for Convolutional Neural Networks: A Core-Set Approach: https://arxiv.org/pdf/1708.00489.pdf [CoreSet]
