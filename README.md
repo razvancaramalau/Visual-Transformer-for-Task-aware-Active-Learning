@@ -1,5 +1,7 @@
 # Visual Transformer for Task-aware Active Learning
 
+If you find this code useful, please cite: https://arxiv.org/abs/2106.03801
+
 ## Requirements:
 python 3.6+
 torch 1.0+
