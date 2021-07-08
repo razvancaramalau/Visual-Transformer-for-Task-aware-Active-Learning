@@ -18,7 +18,7 @@ import yaml
 # Custom
 import models.resnet as resnet
 from models.resnet import vgg11
-from models.query_models import LossNet, GCN, Discriminator1, Discriminator2
+from models.query_models import LossNet, GCN, Discriminator
 from train_test import train, test, train_with_sampler, test_with_sampler
 from load_dataset import load_dataset
 from selection_methods import query_samples
@@ -216,7 +216,7 @@ if __name__ == '__main__':
             
             if (args.method_type == "JLS") or (args.method_type == "TJLS"):
                 with torch.cuda.device(CUDA_VISIBLE_DEVICES):
-                    sampler_module = Discriminator2(512).cuda()
+                    sampler_module = Discriminator(512).cuda()
                     models = {'backbone': model, 'sampler': sampler_module}
                 no_param = 0
                 for parameter in sampler_module.parameters():
