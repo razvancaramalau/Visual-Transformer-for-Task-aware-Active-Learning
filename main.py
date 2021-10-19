@@ -10,7 +10,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, ConcatDataset
 import torch.optim.lr_scheduler as lr_scheduler
-from torch.utils.data.sampler import SubsetRandomSampler
+from torch.utils.data.sampler import SubsetRandomSampler, SequentialSampler
 import torchvision.transforms as T
 import torchvision.models as models
 import argparse
@@ -155,7 +155,7 @@ if __name__ == '__main__':
                     
                         concat_dataset = ConcatDataset((data_train, data_unlabeled))
                         unlabelled_loader = DataLoader(concat_dataset, batch_size=BATCH, 
-                                                        sampler=SubsetRandomSampler(interleaved), 
+                                                        sampler=SequentialSampler(interleaved), 
                                                         pin_memory=True, drop_last=drop_flag)
                         unlab_loader = DataLoader(data_train, batch_size=BATCH, 
                                                         sampler=SubsetRandomSampler(unlabeled_set), 
@@ -165,7 +165,7 @@ if __name__ == '__main__':
                         # interleaved_ext = [x + 50000 for x in labeled_set]
                         interleaved = interleaved #+ interleaved_ext[:2000]
                         unlabelled_loader = DataLoader(data_train, batch_size=BATCH, 
-                                                        sampler=SubsetRandomSampler(interleaved), 
+                                                        sampler=SequentialSampler(interleaved), 
                                                         pin_memory=True, drop_last=drop_flag)
                         unlab_loader = DataLoader(data_unlabeled, batch_size=BATCH, 
                                                         sampler=SubsetRandomSampler(unlabeled_set), 
